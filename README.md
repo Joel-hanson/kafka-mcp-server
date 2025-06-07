@@ -42,7 +42,7 @@ This starts the server and opens the **MCP Inspector** so you can test tool prom
 ### Running the Server
 
 ```bash
-python main.py
+python server.py
 ```
 
 ### Available Tools

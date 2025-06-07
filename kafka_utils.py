@@ -75,7 +75,7 @@ class KafkaManager:
                 **{
                     k: v
                     for k, v in self.config.items()
-                    if k not in ["bootstrap.servers"]
+                    if k not in ["bootstrap.servers", "client.id"]
                 },
             )
         return self.producer
@@ -250,7 +250,7 @@ class KafkaManager:
             }
 
     def send_message(
-        self, topic: str, message: Any, key: Optional[str] = None
+        self, topic: str, message: Optional[Any], key: Optional[str] = None
     ) -> Dict[str, Any]:
         """Send a message to a Kafka topic"""
         try:
