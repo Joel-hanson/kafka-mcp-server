@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Kafka MCP Server - A Model Context Protocol server for Kafka operations using FastMCP
+Kafka Utilities - Core Kafka operations and management functionality
 """
 
 import json
 import logging
-from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from kafka import KafkaConsumer, KafkaProducer
+from kafka import KafkaProducer
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.errors import (
     InvalidPartitionsError,
@@ -20,11 +17,9 @@ from kafka.errors import (
     TopicAlreadyExistsError,
     UnknownTopicOrPartitionError,
 )
-from mcp.server.fastmcp import Context, FastMCP
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("kafka-mcp-server")
+logger = logging.getLogger("kafka-utils")
 
 
 class KafkaManager:
@@ -254,6 +249,30 @@ class KafkaManager:
                 "message": f"Failed to get topic info for '{name}': {str(e)}",
             }
 
+    def send_message(
+        self, topic: str, message: Any, key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Send a message to a Kafka topic"""
+        try:
+            producer = self._get_producer()
+            future = producer.send(
+                topic, value=message, key=key.encode("utf-8") if key else None
+            )
+            record_metadata = future.get(timeout=10)
+
+            return {
+                "status": "success",
+                "message": f"Message sent to topic '{topic}'",
+                "metadata": {
+                    "topic": record_metadata.topic,
+                    "partition": record_metadata.partition,
+                    "offset": record_metadata.offset,
+                },
+            }
+        except Exception as e:
+            logger.error(f"Failed to send message to topic '{topic}': {e}")
+            return {"status": "error", "message": f"Failed to send message: {str(e)}"}
+
     def close(self):
         """Close all connections"""
         if self.admin_client:
@@ -262,168 +281,66 @@ class KafkaManager:
             self.producer.close()
 
 
-@dataclass
-class KafkaContext:
-    """Application context holding Kafka manager"""
+# Troubleshooting and best practices content
+KAFKA_TROUBLESHOOTING_GUIDE = """
+# Kafka Troubleshooting Guide
 
-    kafka_manager: Optional[KafkaManager] = None
+## Issue: {issue}
 
+### Immediate Diagnostic Steps:
+1. **Check Broker Connectivity**
+   - Verify bootstrap servers are reachable
+   - Test network connectivity: `telnet <broker-host> <broker-port>`
+   - Check broker logs for errors
 
-# Create the FastMCP server with lifespan management
-@asynccontextmanager
-async def kafka_lifespan(server: FastMCP) -> AsyncIterator[KafkaContext]:
-    """Manage Kafka connections lifecycle"""
-    context = KafkaContext()
-    try:
-        yield context
-    finally:
-        if context.kafka_manager:
-            context.kafka_manager.close()
+2. **Validate Configuration**
+   - Review client configuration settings
+   - Verify security settings (SASL, SSL)
+   - Check topic-specific configurations
 
+3. **Monitor Key Metrics**
+   - Broker CPU and memory usage
+   - Disk space and I/O performance  
+   - Network latency and throughput
+   - Topic partition distribution
 
-# Initialize the MCP server
-mcp = FastMCP("Kafka MCP Server", lifespan=kafka_lifespan)
+### Common Solutions by Category:
 
+**Connection Issues:**
+- Verify bootstrap.servers configuration
+- Check firewall rules and security groups
+- Validate authentication credentials
+- Test with simple console tools first
 
-@mcp.tool()
-def kafka_initialize_connection(config_file: str, ctx: Context) -> str:
-    """Connect to Kafka using a properties file"""
-    try:
-        kafka_manager = KafkaManager(config_file)
-        # Store in the lifespan context
-        ctx.request_context.lifespan_context.kafka_manager = kafka_manager
-        return f"Successfully connected to Kafka using config file: {config_file}"
-    except Exception as e:
-        return f"Failed to connect to Kafka: {str(e)}"
+**Performance Issues:**
+- Adjust batch.size and linger.ms for producers
+- Tune fetch.min.bytes and fetch.max.wait.ms for consumers
+- Monitor partition balance across brokers
+- Check for hot partitions
 
+**Data Loss/Consistency:**
+- Verify acks=all for critical data
+- Check min.insync.replicas setting
+- Review retention policies
+- Validate replication factor
 
-@mcp.tool()
-def kafka_list_topics(ctx: Context) -> str:
-    """List all topics in the Kafka cluster"""
-    kafka_manager = ctx.request_context.lifespan_context.kafka_manager
-    if not kafka_manager:
-        return "Error: Not connected to Kafka. Please use kafka_initialize_connection first."
+**Consumer Lag:**
+- Scale consumer instances
+- Optimize consumer processing logic
+- Check for slow consumers in group
+- Consider increasing max.poll.records
 
-    try:
-        topics = kafka_manager.list_topics()
-        if topics:
-            topics_info = []
-            for topic in topics:
-                topics_info.append(
-                    f"• {topic['name']} (partitions: {topic['partitions']}, replication: {topic['replication_factor']})"
-                )
-            return f"Topics in Kafka cluster:\n" + "\n".join(topics_info)
-        else:
-            return "No topics found in the Kafka cluster."
-    except Exception as e:
-        return f"Error listing topics: {str(e)}"
+### Prevention Strategies:
+- Implement comprehensive monitoring
+- Set up alerting for key metrics
+- Regular configuration reviews
+- Capacity planning and testing
+- Documentation of operational procedures
 
-
-@mcp.tool()
-def kafka_create_topic(
-    name: str,
-    partitions: int = 1,
-    replication_factor: int = 1,
-    config: Optional[Dict[str, str]] = None,
-    ctx: Context = None,
-) -> str:
-    """Create a new Kafka topic"""
-    kafka_manager = ctx.request_context.lifespan_context.kafka_manager
-    if not kafka_manager:
-        return "Error: Not connected to Kafka. Please use kafka_initialize_connection first."
-
-    try:
-        result = kafka_manager.create_topic(
-            name, partitions, replication_factor, config
-        )
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return f"Error creating topic: {str(e)}"
-
-
-@mcp.tool()
-def kafka_delete_topic(name: str, ctx: Context) -> str:
-    """Delete a Kafka topic"""
-    kafka_manager = ctx.request_context.lifespan_context.kafka_manager
-    if not kafka_manager:
-        return "Error: Not connected to Kafka. Please use kafka_initialize_connection first."
-
-    try:
-        result = kafka_manager.delete_topic(name)
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return f"Error deleting topic: {str(e)}"
-
-
-@mcp.tool()
-def kafka_get_topic_info(name: str, ctx: Context) -> str:
-    """Get detailed information about a specific topic"""
-    kafka_manager = ctx.request_context.lifespan_context.kafka_manager
-    if not kafka_manager:
-        return "Error: Not connected to Kafka. Please use kafka_initialize_connection first."
-
-    try:
-        result = kafka_manager.get_topic_info(name)
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return f"Error getting topic info: {str(e)}"
-
-
-@mcp.resource("kafka://topics")
-def get_all_topics() -> str:
-    """Provide all Kafka topics as a resource"""
-    ctx = mcp.get_context()
-    kafka_manager = ctx.request_context.lifespan_context.kafka_manager
-    if not kafka_manager:
-        return "Not connected to Kafka cluster"
-
-    try:
-        topics = kafka_manager.list_topics()
-        return json.dumps(topics, indent=2)
-    except Exception as e:
-        return f"Error fetching topics: {str(e)}"
-
-
-@mcp.resource("kafka://topic/{topic_name}")
-def get_topic_resource(topic_name: str) -> str:
-    """Provide specific topic information as a resource"""
-    ctx = mcp.get_context()
-    kafka_manager = ctx.request_context.lifespan_context.kafka_manager
-    if not kafka_manager:
-        return "Not connected to Kafka cluster"
-
-    try:
-        result = kafka_manager.get_topic_info(topic_name)
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return f"Error fetching topic info: {str(e)}"
-
-
-@mcp.prompt()
-def kafka_troubleshoot(issue: str) -> str:
-    """Get troubleshooting guidance for Kafka issues"""
-    return f"""
-Help me troubleshoot this Kafka issue: {issue}
-
-Please provide:
-1. Possible causes of this issue
-2. Step-by-step debugging approach
-3. Common solutions
-4. How to prevent this issue in the future
-
-Consider checking:
-- Broker connectivity and health
-- Topic configuration
-- Consumer group status
-- Network and security settings
-- Resource utilization
+Would you like me to elaborate on any specific aspect of this troubleshooting guide?
 """
 
-
-@mcp.prompt()
-def kafka_best_practices() -> str:
-    """Provide Kafka best practices guidance"""
-    return """
+KAFKA_BEST_PRACTICES = """
 Provide comprehensive Kafka best practices covering:
 
 1. **Topic Design:**
@@ -452,7 +369,108 @@ Provide comprehensive Kafka best practices covering:
    - Capacity planning
 """
 
+KAFKA_PERFORMANCE_TUNING = """
+# Kafka Performance Tuning Guide
 
-if __name__ == "__main__":
-    # Run the server
-    mcp.run()
+## Producer Optimization
+
+### Throughput-Focused Settings:
+```properties
+# Batch processing
+batch.size=16384                 # Increase for higher throughput
+linger.ms=5                     # Small delay for batching
+compression.type=lz4            # Fast compression
+
+# Network and memory
+buffer.memory=33554432          # 32MB buffer
+send.buffer.bytes=131072        # 128KB send buffer
+receive.buffer.bytes=65536      # 64KB receive buffer
+```
+
+### Reliability-Focused Settings:
+```properties
+acks=all                        # Wait for all replicas
+retries=2147483647             # Max retries
+max.in.flight.requests.per.connection=1  # Ordering guarantee
+enable.idempotence=true         # Exactly-once semantics
+```
+
+## Consumer Optimization
+
+### High Throughput Settings:
+```properties
+fetch.min.bytes=50000           # Larger fetch sizes
+fetch.max.wait.ms=500          # Balance latency vs throughput
+max.partition.fetch.bytes=1048576  # 1MB per partition
+max.poll.records=500           # More records per poll
+```
+
+### Low Latency Settings:
+```properties
+fetch.min.bytes=1              # Immediate fetch
+fetch.max.wait.ms=100         # Quick response
+max.poll.interval.ms=300000    # Frequent polling
+```
+
+## Broker Configuration
+
+### JVM Settings:
+```bash
+# Heap size (typically 1-6GB)
+-Xms6g -Xmx6g
+
+# G1 Garbage Collector
+-XX:+UseG1GC
+-XX:MaxGCPauseMillis=20
+-XX:InitiatingHeapOccupancyPercent=35
+```
+
+### Key Broker Settings:
+```properties
+# Network threads
+num.network.threads=8
+num.io.threads=16
+
+# Log settings
+log.segment.bytes=1073741824    # 1GB segments
+log.retention.hours=168         # 7 days retention
+log.cleanup.policy=delete
+```
+
+## Topic Design Best Practices
+
+### Partitioning Strategy:
+- **Rule of thumb**: Start with (target throughput / partition throughput)
+- **Consider**: Consumer parallelism requirements
+- **Key distribution**: Ensure even distribution across partitions
+- **Future scaling**: Plan for growth
+
+### Replication Guidelines:
+- **Production**: replication.factor=3 (minimum)
+- **Development**: replication.factor=1 acceptable
+- **min.insync.replicas=2** for durability
+
+## Monitoring Key Metrics
+
+### Producer Metrics:
+
+- `record-send-rate` - records sent/sec
+- `request-latency-avg` - average time to send
+- `record-error-rate` - failed sends
+- `buffer-available-bytes` - remaining producer buffer
+
+### Consumer Metrics:
+
+- `records-consumed-rate` - consumption throughput
+- `fetch-latency-avg` - latency of fetches
+- `rebalance-rate-per-hour` - frequent rebalances are a red flag
+- `commit-latency-avg` - time to commit offsets
+
+### Broker Metrics:
+
+- `MessagesInPerSec` - ingestion rate
+- `BytesInPerSec`, `BytesOutPerSec` - bandwidth
+- `UnderReplicatedPartitions` - should be zero
+- `RequestHandlerAvgIdlePercent` - idle CPU time, low values may signal thread starvation
+
+"""
