@@ -10,13 +10,14 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from mcp.server.fastmcp import Context, FastMCP
+
 from kafka_utils import (
     KAFKA_BEST_PRACTICES,
     KAFKA_PERFORMANCE_TUNING,
     KAFKA_TROUBLESHOOTING_GUIDE,
     KafkaManager,
 )
-from mcp.server.fastmcp import Context, FastMCP
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -133,11 +134,14 @@ def kafka_get_topic_info(name: str, ctx: Context) -> str:
 @mcp.tool()
 def kafka_send_message(
     topic: str,
-    message: Any,
+    message: Optional[Any] = None,
     key: Optional[str] = None,
     ctx: Context = None,
 ) -> str:
     """Send a message to a Kafka topic"""
+    if message is None:
+        return "Error: 'message' must be provided."
+
     kafka_manager = ctx.request_context.lifespan_context.kafka_manager
     if not kafka_manager:
         return "Error: Not connected to Kafka. Please use kafka_initialize_connection first."
